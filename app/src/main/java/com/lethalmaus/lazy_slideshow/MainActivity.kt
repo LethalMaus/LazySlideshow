@@ -1,5 +1,6 @@
 package com.lethalmaus.lazy_slideshow
 
+import android.app.Activity
 import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.PendingIntent
@@ -12,23 +13,26 @@ import android.provider.Settings
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
-    private val onlyWorkDays = true
-    private val startHour = 8
-    private val startMin = 0
-    private val endHour = 17
-    private val endMin = 0
-    private val slideTimeInMillis = 60000L
+    private val viewModel: MainViewModel by viewModels()
+    private var alarmManager: AlarmManager? = null
+    private val calendar: Calendar = GregorianCalendar.getInstance()
+    private lateinit var apps: Array<String>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        alarmManager = applicationContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        apps = resources.getStringArray(R.array.apps)
+
+        requestPermission()
 
         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.O) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -44,13 +48,25 @@ class MainActivity : AppCompatActivity() {
                         or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
         setContentView(R.layout.activity_main)
 
-        requestPermission()
+        viewModel.imageId.observe(this) {
+            Calendar.getInstance().apply {
+                val currentHour = this.get(Calendar.HOUR_OF_DAY)
+                val currentMin = this.get(Calendar.MINUTE)
+                if (currentHour > endHour || (currentHour == endHour && currentMin >= endMin)) {
+                    setNextStart()
+                    finish()
+                }
+            }
+            findViewById<ImageView>(R.id.slide).setImageResource(it)
+        }
 
-        val today = Date()
-        val calendar: Calendar = GregorianCalendar.getInstance()
+        viewModel.cycleImages(resources.obtainTypedArray(R.array.images), this::cycleApps)
+    }
+
+    private fun setNextStart() {
         calendar.clear()
         calendar.timeZone = TimeZone.getDefault()
-        calendar.time = today
+        calendar.time = Date()
         if (onlyWorkDays && calendar.get(Calendar.DAY_OF_WEEK) == Calendar.FRIDAY) {
             calendar.add(Calendar.DATE, 3)
         } else {
@@ -60,60 +76,84 @@ class MainActivity : AppCompatActivity() {
         calendar.set(Calendar.MINUTE, startMin)
         calendar.time
 
-        val alarmManager = applicationContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-        val mIntent = Intent(applicationContext, Receiver::class.java)
-        val pendingIntent = PendingIntent.getBroadcast(
+        alarmManager?.setExactAndAllowWhileIdle(
+            AlarmManager.RTC_WAKEUP,
+            calendar.timeInMillis,
+            PendingIntent.getBroadcast(
                 applicationContext,
                 1,
-                mIntent,
+                Intent(applicationContext, Receiver::class.java),
                 PendingIntent.FLAG_CANCEL_CURRENT
+            )
         )
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            alarmManager?.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
+    private fun cycleApps() {
+        calendar.clear()
+        calendar.timeZone = TimeZone.getDefault()
+        calendar.time = Date()
+        if (apps.isEmpty()) {
+            viewModel.cycleImages(resources.obtainTypedArray(R.array.images))
+            return
+        }
+        apps.drop(1).forEach {
+            calendar.set(Calendar.MILLISECOND, calendar.get(Calendar.MILLISECOND) + slideTimeInMillis.toInt())
+            alarmManager?.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                calendar.timeInMillis,
+                PendingIntent.getActivity(
+                    applicationContext,
+                    0,
+                    getAppIntent(it),
+                    PendingIntent.FLAG_CANCEL_CURRENT
+                )
+            )
+        }
+        apps.getOrNull(0)?.let {
+            calendar.set(Calendar.MILLISECOND, calendar.get(Calendar.MILLISECOND) + slideTimeInMillis.toInt())
+            alarmManager?.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                calendar.timeInMillis,
+                PendingIntent.getBroadcast(
+                    applicationContext,
+                    1,
+                    Intent(applicationContext, Receiver::class.java),
+                    PendingIntent.FLAG_CANCEL_CURRENT
+                )
+            )
+            startActivity(getAppIntent(it))
+        }
+    }
+
+    private fun getAppIntent(appName: String): Intent {
+        intent = if (appName.startsWith("http")) {
+            Intent(Intent.ACTION_VIEW, Uri.parse(appName))
         } else {
-            alarmManager?.setExact(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
+            packageManager.getLaunchIntentForPackage(appName)
         }
-
-        GlobalScope.launch {
-            var imageNumber = 1
-            while (true) {
-                var id = resources.getIdentifier("image$imageNumber", "drawable", packageName)
-                if (id == 0) {
-                    imageNumber = 1
-                    id = resources.getIdentifier("image$imageNumber", "drawable", packageName)
-                }
-                imageNumber++
-                runOnUiThread {
-                    findViewById<ImageView>(R.id.slide).setImageResource(id)
-                }
-                delay(slideTimeInMillis)
-                Calendar.getInstance().apply {
-                    if (this.get(Calendar.HOUR_OF_DAY) >= endHour && this.get(Calendar.MINUTE) >= endMin) {
-                        finish()
-                    }
-                }
-            }
+        if (intent == null) {
+            intent = Intent(Intent.ACTION_VIEW)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.data = Uri.parse("market://details?id=$appName")
         }
+        return intent
     }
 
     private fun requestPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.canDrawOverlays(this)) {
-                val intent = Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + this.packageName)
-                )
-                startActivityForResult(intent, 5)
-            }
+        if (!Settings.canDrawOverlays(this)) {
+            startForResult.launch(Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${this.packageName}")
+            ))
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == 5 && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Cannot do without permission", Toast.LENGTH_SHORT).show()
+    private val startForResult = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result: ActivityResult ->
+        if (result.resultCode == Activity.RESULT_OK && !Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Cannot do without required manage overlay permission", Toast.LENGTH_SHORT).show()
             finish()
         }
-        super.onActivityResult(requestCode, resultCode, data)
     }
 }

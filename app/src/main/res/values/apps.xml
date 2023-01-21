@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="apps">
+        <item>https://stackoverflow.com/users/8407336/lethalmaus</item>
+        <item>com.google.android.calendar</item>
+        <item>com.google.android.apps.tasks</item>
+    </string-array>
+</resources>
